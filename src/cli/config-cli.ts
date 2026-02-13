@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import JSON5 from "json5";
 import { readConfigFileSnapshot, writeConfigFile } from "../config/config.js";
+import { redactConfigObject } from "../config/redact-snapshot.js";
 import { danger, info } from "../globals.js";
 import { defaultRuntime } from "../runtime.js";
 import { formatDocsLink } from "../terminal/links.js";
@@ -260,6 +261,7 @@ export function registerConfigCli(program: Command) {
     .description("Get a config value by dot path")
     .argument("<path>", "Config path (dot or bracket notation)")
     .option("--json", "Output JSON", false)
+    .option("--show-secrets", "Show unredacted secret values (unsafe)", false)
     .action(async (path: string, opts) => {
       try {
         const parsedPath = parsePath(path);
@@ -267,7 +269,13 @@ export function registerConfigCli(program: Command) {
           throw new Error("Path is empty.");
         }
         const snapshot = await loadValidConfig();
-        const res = getAtPath(snapshot.config, parsedPath);
+        const sourceConfig = opts.showSecrets ? snapshot.config : redactConfigObject(snapshot.config);
+        if (opts.showSecrets) {
+          defaultRuntime.error(
+            theme.warn("Warning: --show-secrets prints sensitive values to your terminal history."),
+          );
+        }
+        const res = getAtPath(sourceConfig, parsedPath);
         if (!res.found) {
           defaultRuntime.error(danger(`Config path not found: ${path}`));
           defaultRuntime.exit(1);
