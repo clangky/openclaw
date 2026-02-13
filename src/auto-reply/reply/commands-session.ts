@@ -5,7 +5,11 @@ import { updateSessionStore } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
 import { scheduleGatewaySigusr1Restart, triggerOpenClawRestart } from "../../infra/restart.js";
-import { loadCostUsageSummary, loadSessionCostSummary } from "../../infra/session-cost-usage.js";
+import {
+  discoverAllSessions,
+  loadCostUsageSummary,
+  loadSessionCostSummary,
+} from "../../infra/session-cost-usage.js";
 import { formatTokenCount, formatUsd } from "../../utils/usage-format.js";
 import { parseActivationCommand } from "../group-activation.js";
 import { parseSendPolicyCommand } from "../send-policy.js";
@@ -51,6 +55,132 @@ function resolveAbortTarget(params: {
     };
   }
   return { entry: undefined, key: targetSessionKey, sessionId: undefined };
+}
+
+type UsageReportRange = "day" | "week" | "month";
+
+function parseUsageReportRange(rawArgs: string): UsageReportRange | null {
+  const arg = rawArgs.trim().toLowerCase();
+  if (!arg) {
+    return null;
+  }
+  if (["day", "daily", "today"].includes(arg)) {
+    return "day";
+  }
+  if (["week", "weekly", "7d"].includes(arg)) {
+    return "week";
+  }
+  if (["month", "monthly", "30d", "mtd"].includes(arg)) {
+    return "month";
+  }
+  if (arg.startsWith("report")) {
+    const parts = arg.split(/\s+/).filter(Boolean);
+    if (parts.length <= 1) {
+      return "day";
+    }
+    return parseUsageReportRange(parts.slice(1).join(" "));
+  }
+  return null;
+}
+
+function getUsageRangeBounds(range: UsageReportRange): { startMs: number; endMs: number; label: string } {
+  const now = new Date();
+  const endMs = now.getTime();
+
+  if (range === "day") {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    return { startMs: start.getTime(), endMs, label: "today" };
+  }
+
+  if (range === "week") {
+    const start = new Date(now);
+    start.setDate(start.getDate() - 6);
+    start.setHours(0, 0, 0, 0);
+    return { startMs: start.getTime(), endMs, label: "last 7 days" };
+  }
+
+  const start = new Date(now.getFullYear(), now.getMonth(), 1);
+  return { startMs: start.getTime(), endMs, label: "month to date" };
+}
+
+async function buildUsageReport(params: { range: UsageReportRange; config: unknown }) {
+  const bounds = getUsageRangeBounds(params.range);
+  const summary = await loadCostUsageSummary({
+    startMs: bounds.startMs,
+    endMs: bounds.endMs,
+    config: params.config as any,
+  });
+
+  const sessions = await discoverAllSessions({ startMs: bounds.startMs, endMs: bounds.endMs });
+  const byModel = new Map<
+    string,
+    { provider?: string; model?: string; input: number; output: number; cacheRead: number; cacheWrite: number; totalCost: number }
+  >();
+
+  for (const discovered of sessions) {
+    const perSession = await loadSessionCostSummary({
+      sessionFile: discovered.sessionFile,
+      startMs: bounds.startMs,
+      endMs: bounds.endMs,
+      config: params.config as any,
+    });
+    if (!perSession?.modelUsage?.length) {
+      continue;
+    }
+
+    for (const modelUsage of perSession.modelUsage) {
+      const key = `${modelUsage.provider ?? "unknown"}::${modelUsage.model ?? "unknown"}`;
+      const existing =
+        byModel.get(key) ?? {
+          provider: modelUsage.provider,
+          model: modelUsage.model,
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalCost: 0,
+        };
+      existing.input += modelUsage.totals.input ?? 0;
+      existing.output += modelUsage.totals.output ?? 0;
+      existing.cacheRead += modelUsage.totals.cacheRead ?? 0;
+      existing.cacheWrite += modelUsage.totals.cacheWrite ?? 0;
+      existing.totalCost += modelUsage.totals.totalCost ?? 0;
+      byModel.set(key, existing);
+    }
+  }
+
+  const rows = Array.from(byModel.values())
+    .map((row) => ({
+      ...row,
+      tokens: row.input + row.output + row.cacheRead + row.cacheWrite,
+    }))
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, 8);
+
+  const totalTokens =
+    (summary.totals.input ?? 0) +
+    (summary.totals.output ?? 0) +
+    (summary.totals.cacheRead ?? 0) +
+    (summary.totals.cacheWrite ?? 0);
+
+  const lines = [
+    `📊 Usage report (${bounds.label})`,
+    `Total: ${formatTokenCount(totalTokens)} tokens${summary.totals.totalCost ? ` · ${formatUsd(summary.totals.totalCost) ?? "n/a"}` : ""}`,
+  ];
+
+  if (!rows.length) {
+    lines.push("No model usage found for this period.");
+  } else {
+    lines.push("By model:");
+    for (const row of rows) {
+      const name = `${row.provider ?? "unknown"}/${row.model ?? "unknown"}`;
+      const cost = formatUsd(row.totalCost) ?? "n/a";
+      lines.push(`- ${name}: ${formatTokenCount(row.tokens)} tokens · ${cost}`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 export const handleActivationCommand: CommandHandler = async (params, allowTextCommands) => {
@@ -160,6 +290,13 @@ export const handleUsageCommand: CommandHandler = async (params, allowTextComman
   }
 
   const rawArgs = normalized === "/usage" ? "" : normalized.slice("/usage".length).trim();
+
+  const range = parseUsageReportRange(rawArgs);
+  if (range) {
+    const report = await buildUsageReport({ range, config: params.cfg });
+    return { shouldContinue: false, reply: { text: report } };
+  }
+
   const requested = rawArgs ? normalizeUsageDisplay(rawArgs) : undefined;
   if (rawArgs.toLowerCase().startsWith("cost")) {
     const sessionSummary = await loadSessionCostSummary({
@@ -202,7 +339,7 @@ export const handleUsageCommand: CommandHandler = async (params, allowTextComman
   if (rawArgs && !requested) {
     return {
       shouldContinue: false,
-      reply: { text: "⚙️ Usage: /usage off|tokens|full|cost" },
+      reply: { text: "⚙️ Usage: /usage off|tokens|full|cost|day|week|month" },
     };
   }
 
