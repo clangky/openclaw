@@ -124,6 +124,45 @@ describe("gateway config.patch", () => {
     expect(stored.channels?.telegram?.botToken).toBe("token-1");
   });
 
+  it("returns unredacted config when config.get showSecrets=true", async () => {
+    const setId = "req-set-show-secrets";
+    ws.send(
+      JSON.stringify({
+        type: "req",
+        id: setId,
+        method: "config.set",
+        params: {
+          raw: JSON.stringify({
+            gateway: { mode: "local" },
+            channels: { telegram: { botToken: "token-raw-1234" } },
+          }),
+        },
+      }),
+    );
+    const setRes = await onceMessage<{ ok: boolean }>(
+      ws,
+      (o) => o.type === "res" && o.id === setId,
+    );
+    expect(setRes.ok).toBe(true);
+
+    const getId = "req-get-show-secrets";
+    ws.send(
+      JSON.stringify({
+        type: "req",
+        id: getId,
+        method: "config.get",
+        params: { showSecrets: true },
+      }),
+    );
+    const getRes = await onceMessage<{
+      ok: boolean;
+      payload?: { config?: { channels?: { telegram?: { botToken?: string } } } };
+    }>(ws, (o) => o.type === "res" && o.id === getId);
+
+    expect(getRes.ok).toBe(true);
+    expect(getRes.payload?.config?.channels?.telegram?.botToken).toBe("token-raw-1234");
+  });
+
   it("preserves credentials on config.set when raw contains redacted sentinels", async () => {
     const setId = "req-set-sentinel-1";
     ws.send(

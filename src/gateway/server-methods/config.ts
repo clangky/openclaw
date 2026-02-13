@@ -105,7 +105,8 @@ export const configHandlers: GatewayRequestHandlers = {
       return;
     }
     const snapshot = await readConfigFileSnapshot();
-    respond(true, redactConfigSnapshot(snapshot), undefined);
+    const showSecrets = Boolean((params as { showSecrets?: boolean } | undefined)?.showSecrets);
+    respond(true, showSecrets ? snapshot : redactConfigSnapshot(snapshot), undefined);
   },
   "config.schema": ({ params, respond }) => {
     if (!validateConfigSchemaParams(params)) {
