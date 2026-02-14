@@ -151,7 +151,7 @@ export function helpText(options: SlashCommandOptions = {}): string {
     `/think <${thinkLevels}>`,
     "/verbose <on|off>",
     "/reasoning <on|off>",
-    "/usage <off|tokens|full>",
+    "/usage <off|tokens|full|cost|day|week|month>",
     "/elevated <on|off|ask|full>",
     "/elev <on|off|ask|full>",
     "/activation <mention|always>",

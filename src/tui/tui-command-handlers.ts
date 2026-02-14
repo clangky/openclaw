@@ -367,9 +367,27 @@ export function createCommandHandlers(context: CommandHandlerContext) {
         }
         break;
       case "usage": {
+        const reportRange = args ? args.trim().toLowerCase() : "";
+        if (["cost", "day", "week", "month"].includes(reportRange)) {
+          try {
+            const { runId } = await client.sendChat({
+              sessionKey: state.currentSessionKey,
+              message: `/usage ${reportRange}`,
+              deliver: deliverDefault,
+              thinking: opts.thinking,
+              timeoutMs: opts.timeoutMs,
+            });
+            noteLocalRunId(runId);
+            setActivityStatus(`running ${runId.slice(0, 8)}…`);
+          } catch (err) {
+            chatLog.addSystem(`usage failed: ${String(err)}`);
+          }
+          break;
+        }
+
         const normalized = args ? normalizeUsageDisplay(args) : undefined;
         if (args && !normalized) {
-          chatLog.addSystem("usage: /usage <off|tokens|full>");
+          chatLog.addSystem("usage: /usage <off|tokens|full|cost|day|week|month>");
           break;
         }
         const currentRaw = state.sessionInfo.responseUsage;
